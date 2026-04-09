@@ -31,6 +31,7 @@ use claurst_core::keybindings::{
     KeyContext, KeybindingResolver, KeybindingResult, ParsedKeystroke, UserKeybindings,
 };
 use claurst_core::types::{ContentBlock, Message, Role};
+use parking_lot::Mutex as ParkingMutex;
 use claurst_query::QueryEvent;
 use claurst_tools;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -816,6 +817,11 @@ pub struct App {
     /// Receiver for background session-list results.
     pub session_list_rx:
         Option<tokio::sync::mpsc::Receiver<Vec<crate::session_browser::SessionEntry>>>,
+    /// Receiver for background session-load results.
+    pub session_load_rx: Option<tokio::sync::mpsc::Receiver<anyhow::Result<claurst_core::history::ConversationSession>>>,
+    /// Session ID to load when a session is selected from the browser.
+    /// This is set by try_load_session and processed in tick_background_tasks.
+    pub pending_session_load: Option<String>,
     /// Credential store for provider API keys and OAuth tokens.
     pub auth_store: claurst_core::AuthStore,
     /// Connect-a-provider dialog (/connect command).
@@ -1235,6 +1241,8 @@ impl App {
             model_picker_fetch_pending: false,
             session_list_pending: false,
             session_list_rx: None,
+            session_load_rx: None,
+            pending_session_load: None,
             auth_store: claurst_core::AuthStore::load(),
             connect_dialog: DialogSelectState::new("Connect a provider", provider_picker_items()),
             command_palette: {
@@ -2572,6 +2580,13 @@ impl App {
         self.refresh_prompt_input();
     }
 
+    pub fn try_load_session(&mut self, session_id: &str) {
+        // Set the pending session load flag. The actual loading will happen
+        // in tick_background_tasks using an async task, which avoids the
+        // "Cannot start a runtime from within a runtime" error.
+        self.pending_session_load = Some(session_id.to_string());
+    }
+
     fn refresh_turn_diff_from_history(&mut self) {
         let Some(file_history) = self.file_history.as_ref() else {
             self.diff_viewer.set_turn_diff(Vec::new());
@@ -2954,6 +2969,13 @@ impl App {
                         KeyCode::Up => self.session_browser.select_prev(),
                         KeyCode::Down => self.session_browser.select_next(),
                         KeyCode::Char('r') => self.session_browser.start_rename(),
+                        KeyCode::Enter => {
+                            if let Some(session) = self.session_browser.selected_session() {
+                                let id = session.id.clone();
+                                self.try_load_session(&id);
+                                self.session_browser.close();
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -5223,6 +5245,45 @@ impl App {
             }
         }
 
+        // Drain background session-load results.
+        if let Some(ref mut rx) = self.session_load_rx {
+            match rx.try_recv() {
+                Ok(Ok(session)) => {
+                    // Apply the same state updates that CLI layer does for CommandResult::ResumeSession
+                    self.replace_messages(session.messages.clone());
+                    self.config.model = Some(session.model.clone());
+                    self.model_name = session.model.clone();
+                    
+                    // Update file history and current turn
+                    self.file_history = Some(Arc::new(ParkingMutex::new(
+                        claurst_core::file_history::FileHistory::new(),
+                    )));
+                    self.current_turn = Some(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+                    self.attach_turn_diff_state(
+                        self.file_history.clone().unwrap(),
+                        self.current_turn.clone().unwrap(),
+                    );
+                    
+                    // Update session title
+                    if let Some(ref title) = session.title {
+                        self.session_title = Some(title.clone());
+                        crate::update_terminal_title(Some(title));
+                    }
+                    
+                    self.status_message = Some(format!("Resumed session {}.", &session.id[..8]));
+                }
+                Ok(Err(e)) => {
+                    self.status_message = Some(format!("Failed to load session: {}", e));
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) | 
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            }
+            if self.session_load_rx.is_some() {
+                self.session_load_rx = None;
+                self.background_task_count = self.background_task_count.saturating_sub(1);
+            }
+        }
+
         // Spawn async session-list load when requested.
         if self.session_list_pending {
             self.session_list_pending = false;
@@ -5255,6 +5316,21 @@ impl App {
                     .collect();
                 let _ = tx.send(entries).await;
             });
+        }
+
+        // Handle pending session load (from try_load_session).
+        if let Some(session_id) = self.pending_session_load.take() {
+            self.background_task_count += 1;
+            self.background_task_status = Some(format!("Loading session {}...", &session_id[..8]));
+            
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tokio::spawn(async move {
+                let result = claurst_core::history::load_session(&session_id).await;
+                let _ = tx.send(result).await;
+            });
+            
+            // Store the receiver to process the result
+            self.session_load_rx = Some(rx);
         }
 
         // Drain voice transcription events (non-blocking).
