@@ -133,7 +133,7 @@ Define custom agents in `~/.claurst/settings.json` under the `agents` key. Custo
 | `access` | string | Permission restriction: `"full"` (all tools), `"read-only"` (no writes/shell), `"search-only"` (search tools only). Default: `"full"`. |
 | `visible` | bool | Whether to show in `/agents` output. Default: `true`. |
 | `max_turns` | number or null | Maximum agentic turns. Null means unlimited. Overrides the global turn budget. |
-| `color` | string | ANSI terminal color for display: `"cyan"`, `"magenta"`, `"green"`, `"yellow"`, `"blue"`, etc. |
+| `color` | string | TUI highlight color: `"cyan"`, `"magenta"`, `"yellow"`, `"blue"`, `"green"`, `"red"`, `"gray"`, etc. |
 
 Use the agent with the `--agent` flag:
 

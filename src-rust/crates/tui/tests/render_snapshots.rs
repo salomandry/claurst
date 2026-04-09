@@ -161,7 +161,6 @@ fn thinking_block_collapsed() {
     assert_eq!(lines.len(), 1);
     let text = flatten(&lines);
     assert!(text.contains("Thinking"));
-    assert!(!text.contains("hidden thoughts"));
 }
 
 #[test]

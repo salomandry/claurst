@@ -1065,6 +1065,28 @@ pub const ACCENT_PLAN: Color = Color::Rgb(66, 135, 245);
 /// Accent color for explore mode (amber).
 pub const ACCENT_EXPLORE: Color = Color::Rgb(245, 189, 66);
 
+pub fn parse_color(name: &str) -> Option<Color> {
+    match name.to_lowercase().as_str() {
+        "black" => Some(Color::Black),
+        "red" => Some(Color::Red),
+        "green" => Some(Color::Green),
+        "yellow" => Some(Color::Yellow),
+        "blue" => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "cyan" => Some(Color::Cyan),
+        "gray" => Some(Color::Gray),
+        "darkgray" | "dark_gray" => Some(Color::DarkGray),
+        "lightred" | "light_red" => Some(Color::LightRed),
+        "lightgreen" | "light_green" => Some(Color::LightGreen),
+        "lightyellow" | "light_yellow" => Some(Color::LightYellow),
+        "lightblue" | "light_blue" => Some(Color::LightBlue),
+        "lightmagenta" | "light_magenta" => Some(Color::LightMagenta),
+        "lightcyan" | "light_cyan" => Some(Color::LightCyan),
+        "white" => Some(Color::White),
+        _ => None,
+    }
+}
+
 /// Return the accent color for a given agent mode name.
 pub fn accent_for_mode(mode: Option<&str>) -> Color {
     match mode {
@@ -1609,26 +1631,62 @@ impl App {
         );
     }
 
-    /// Cycle to the next agent mode: build → plan → explore → build.
+    /// Set the active agent mode directly by name.
+    pub fn set_agent_mode(&mut self, agent: String) {
+        self.agent_mode = Some(agent.clone());
+        self.agent_mode_changed = true;
+        
+        let color = self.config.agents.get(&agent)
+            .and_then(|a| a.color.as_deref())
+            .and_then(parse_color)
+            .unwrap_or_else(|| accent_for_mode(Some(&agent)));
+            
+        self.accent_color = color;
+        self.plan_mode = agent == "plan";
+        let label = self.agent_mode.clone().unwrap();
+        self.status_message = Some(format!("Switched to {} mode.", label));
+    }
+
+    /// Cycle to the next agent mode matching defined keys.
     /// Sets `agent_mode_changed` so the main loop can update the query config
     /// and tool list accordingly.
     pub fn cycle_agent_mode(&mut self) {
-        const MODES: &[&str] = &["build", "plan", "explore"];
+        let mut modes = vec!["build".to_string(), "plan".to_string(), "explore".to_string()];
+        
+        // Add defined agents
+        for key in self.config.agents.keys() {
+            if modes.iter().all(|m| m != key) {
+                modes.push(key.clone());
+            }
+        }
+        
         let current = self.agent_mode.as_deref().unwrap_or("build");
-        let idx = MODES.iter().position(|&m| m == current).unwrap_or(0);
-        let next = MODES[(idx + 1) % MODES.len()];
-        self.agent_mode = Some(next.to_string());
+        let idx = modes.iter().position(|m| m == current).unwrap_or(0);
+        let next = modes[(idx + 1) % modes.len()].clone();
+        
+        self.agent_mode = Some(next.clone());
         self.agent_mode_changed = true;
-        self.accent_color = accent_for_mode(Some(next));
+        
+        let color = self.config.agents.get(&next)
+            .and_then(|a| a.color.as_deref())
+            .and_then(parse_color)
+            .unwrap_or_else(|| accent_for_mode(Some(&next)));
+            
+        self.accent_color = color;
 
         // Sync plan_mode flag for legacy code paths
         self.plan_mode = next == "plan";
 
-        let label = match next {
+        let label = match next.as_str() {
             "build" => "Build",
             "plan" => "Plan",
             "explore" => "Explore",
-            other => other,
+            other => {
+                // If we want a nice capitalized label for custom ones:
+                // We'll leave it lowercase unless it matches a known format,
+                // but for UI a nice tweak is fine. (we return `other`)
+                other
+            }
         };
         self.status_message = Some(format!("Switched to {} mode.", label));
     }
@@ -3745,7 +3803,14 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => self.agents_menu.go_back(),
             KeyCode::Up => self.agents_menu.select_prev(),
             KeyCode::Down => self.agents_menu.select_next(),
-            KeyCode::Enter | KeyCode::Right => self.agents_menu.confirm_selection(),
+            KeyCode::Enter | KeyCode::Right => {
+                if let Some(agent_name) = self.agents_menu.get_selected_agent_name() {
+                    self.set_agent_mode(agent_name);
+                    self.agents_menu.close();
+                } else {
+                    self.agents_menu.confirm_selection()
+                }
+            }
             KeyCode::Left => self.agents_menu.go_back(),
             _ => {}
         }

@@ -475,7 +475,7 @@ You can define custom agents in `settings.json`:
 | `access` | string | Permission level: `"full"`, `"read-only"`, or `"search-only"`. |
 | `visible` | boolean | Whether to show in autocomplete. Default: true. |
 | `max_turns` | integer \| null | Maximum agentic turns. |
-| `color` | string \| null | ANSI display color: `"cyan"`, `"magenta"`, `"green"`, `"yellow"`, etc. |
+| `color` | string \| null | TUI highlight color: `"cyan"`, `"magenta"`, `"yellow"`, `"blue"`, `"green"`, `"red"`, `"gray"`, etc. |
 
 Invoke an agent with `@agentname` in the TUI or `--agent agentname` on the CLI.
 

@@ -191,14 +191,6 @@ fn short_model_name(model: &str) -> String {
         .to_string()
 }
 
-fn title_case_mode(mode: &str) -> String {
-    let mut chars = mode.chars();
-    match chars.next() {
-        Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
-        None => String::new(),
-    }
-}
-
 fn render_attachment_chip(kind: &str, label: String) -> Line<'static> {
     Line::from(vec![
         Span::styled(
@@ -229,7 +221,13 @@ pub fn render_transcript_assistant_meta(meta: Option<&TurnMetadata>, accent: Col
         .agent_mode
         .as_deref()
         .filter(|m| !m.is_empty())
-        .map(title_case_mode)
+        .map(|m| {
+            let mut c = m.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            }
+        })
         .unwrap_or_else(|| "Build".to_string());
 
     let mut spans = vec![
@@ -1047,7 +1045,7 @@ pub fn render_thinking_block(text: &str, expanded: bool) -> Vec<Line<'static>> {
     let heading = reasoning_heading(text).unwrap_or_else(|| "Thinking".to_string());
     lines.push(Line::from(vec![
         Span::styled(
-            "Thinking: ",
+            if expanded { "Thinking: " } else { "Thinking: " },
             Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
         ),
         Span::styled(

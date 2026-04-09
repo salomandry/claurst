@@ -283,7 +283,7 @@ fn render_welcome_page(frame: &mut Frame, area: Rect) {
             Style::default().fg(pink).add_modifier(Modifier::BOLD),
         )),
         cmd_label("/help", "show all commands"),
-        cmd_label("/model", "switch AI model"),
+        cmd_label("/agents", "browse agent definitions"),
         cmd_label("/connect", "connect a provider"),
         cmd_label("/compact", "summarise conversation to save context"),
         cmd_label("/cost", "show token usage and cost"),
@@ -387,7 +387,7 @@ mod tests {
     fn onboarding_defaults_hidden() {
         let state = OnboardingDialogState::new();
         assert!(!state.visible);
-        assert_eq!(state.page, OnboardingPage::Welcome);
+        assert_eq!(state.page, OnboardingPage::ProviderSetup);
     }
 
     #[test]

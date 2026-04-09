@@ -265,6 +265,21 @@ impl AgentsMenuState {
         self.selected_row = (self.selected_row + 1) % row_count;
     }
 
+    pub fn get_selected_agent_name(&self) -> Option<String> {
+        match self.route {
+            AgentsRoute::List => {
+                if self.selected_row > 0 {
+                    let idx = self.selected_row - 1;
+                    if idx < self.definitions.len() {
+                        return Some(self.definitions[idx].name.clone());
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     pub fn confirm_selection(&mut self) {
         match self.route {
             AgentsRoute::List => {
