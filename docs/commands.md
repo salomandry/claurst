@@ -102,6 +102,14 @@ Resume a previous session from the session store. Displays a list of recent sess
 /resume <session-id>
 ```
 
+**Session Browser:** When run without arguments, `/resume` opens an interactive session browser where you can:
+- Navigate sessions using `Up`/`Down` or `j`/`k`
+- Press `Enter` to immediately load a selected session
+- Press `r` to rename a session
+- Press `Esc` to cancel
+
+The session browser loads sessions asynchronously to avoid UI freezes, and switching sessions is handled safely without stack overflow issues.
+
 ---
 
 ### /session
