@@ -237,6 +237,35 @@ fn model_entry(id: &str, name: &str, desc: &str) -> ModelEntry {
     }
 }
 
+/// Returns `true` when OpenAI should list models from the live API only, not
+/// from the models.dev cache or bundled defaults (custom `OPENAI_BASE_URL`,
+/// `api_base` in settings, or `OPENAI_BASE_URL` in `config.env`).
+pub fn openai_uses_non_default_base(config: &claurst_core::config::Config) -> bool {
+    if let Some(pc) = config.provider_configs.get("openai") {
+        if let Some(ref b) = pc.api_base {
+            let t = b.trim();
+            if !t.is_empty() {
+                if let Some(norm) = claurst_api::normalize_openai_base_url(b) {
+                    if !norm.eq_ignore_ascii_case("https://api.openai.com") {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    let raw = config
+        .env
+        .get("OPENAI_BASE_URL")
+        .cloned()
+        .or_else(|| std::env::var("OPENAI_BASE_URL").ok());
+    let Some(raw) = raw else {
+        return false;
+    };
+    claurst_api::normalize_openai_base_url(&raw)
+        .map(|u| !u.eq_ignore_ascii_case("https://api.openai.com"))
+        .unwrap_or(false)
+}
+
 /// Get models for a provider from the model registry (models.dev data).
 ///
 /// Falls back to the hardcoded `models_for_provider()` list when the registry
@@ -1179,5 +1208,33 @@ mod tests {
         let ids: Vec<&str> = p.models.iter().map(|m| m.id.as_str()).collect();
         assert!(ids.contains(&"gpt-4o"));
         assert!(!ids.iter().any(|id| id.contains("claude")));
+    }
+
+    #[test]
+    fn openai_non_default_from_provider_config_api_base() {
+        use claurst_core::config::ProviderConfig;
+        let mut c = claurst_core::config::Config::default();
+        c.provider_configs.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                api_base: Some("https://ai.salamander69.com".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(openai_uses_non_default_base(&c));
+    }
+
+    #[test]
+    fn openai_non_default_false_for_public_api_base() {
+        use claurst_core::config::ProviderConfig;
+        let mut c = claurst_core::config::Config::default();
+        c.provider_configs.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                api_base: Some("https://api.openai.com".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(!openai_uses_non_default_base(&c));
     }
 }

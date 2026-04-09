@@ -932,73 +932,11 @@ pub async fn run_query_loop(
                 || client.api_key_is_empty();
 
             if use_provider_dispatch {
-                let pid = claurst_core::provider_id::ProviderId::new(&provider_id_str);
-
-                // Always prefer a fresh provider built from the auth_store so
-                // that keys added at runtime via /connect are picked up
-                // immediately — even when the provider was pre-registered at
-                // startup with a stale or missing key.
-                let runtime_provider =
-                    claurst_api::registry::runtime_provider_for(&provider_id_str);
-
-                let registry_provider = if runtime_provider.is_some() {
-                    // Fresh auth_store key available — use it instead of the
-                    // (possibly stale) registry entry.
-                    None
-                } else {
-                    registry.get(&pid).cloned()
-                };
-
-                let mut provider = runtime_provider.or(registry_provider);
-
-                // If the user supplied api_base for a local provider (Ollama, LM Studio,
-                // llama.cpp), rebuild the provider with the override URL.  These providers
-                // are always constructed with a hardcoded default URL, so without this
-                // the api_base setting would be silently ignored.
-                if let Some(override_base) = tool_ctx.config.provider_configs
-                    .get(&provider_id_str)
-                    .and_then(|pc| pc.api_base.as_deref())
-                {
-                    use claurst_api::providers::openai_compat_providers;
-                    let trimmed = override_base.trim_end_matches('/');
-                    // Avoid double /v1 suffix: only append if not already present.
-                    let base_url = if trimmed.ends_with("/v1") {
-                        trimmed.to_string()
-                    } else {
-                        format!("{}/v1", trimmed)
-                    };
-                    let overridden: Option<std::sync::Arc<dyn claurst_api::LlmProvider>> =
-                        match provider_id_str.as_str() {
-                            // OpenAI: same as OPENAI_BASE_URL / env registration — config api_base
-                            // must override the default https://api.openai.com for proxies.
-                            "openai" => claurst_core::AuthStore::load()
-                                .api_key_for("openai")
-                                .and_then(|key| {
-                                    claurst_api::normalize_openai_base_url(override_base).map(
-                                        |base| {
-                                            std::sync::Arc::new(
-                                                claurst_api::OpenAiProvider::new(key)
-                                                    .with_base_url(base),
-                                            )
-                                                as std::sync::Arc<dyn claurst_api::LlmProvider>
-                                        },
-                                    )
-                                }),
-                            "ollama" => Some(std::sync::Arc::new(
-                                openai_compat_providers::ollama().with_base_url(base_url),
-                            )),
-                            "lmstudio" | "lm-studio" => Some(std::sync::Arc::new(
-                                openai_compat_providers::lm_studio().with_base_url(base_url),
-                            )),
-                            "llamacpp" | "llama-cpp" | "llama-server" => Some(std::sync::Arc::new(
-                                openai_compat_providers::llama_cpp().with_base_url(base_url),
-                            )),
-                            _ => None,
-                        };
-                    if overridden.is_some() {
-                        provider = overridden;
-                    }
-                }
+                let provider = claurst_api::registry::provider_with_config_overrides(
+                    registry,
+                    &provider_id_str,
+                    &tool_ctx.config,
+                );
                 if let Some(provider) = provider {
                     debug!(provider = %provider_id_str, model = %model_id_str, "Dispatching to non-Anthropic provider");
 

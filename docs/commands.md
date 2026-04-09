@@ -165,7 +165,16 @@ Summarize and compress the conversation history to reduce context window usage. 
 
 ### /model
 
-Open the interactive model picker. Displays a searchable list of available models from all configured providers. The selected model is used for all subsequent inference in the current session.
+Open the interactive model picker for the **active** provider (`config.provider`). The list is searchable; the choice applies to the rest of the session.
+
+**How the list is built**
+
+- The picker starts from the bundled model registry (plus an optional `models.dev` cache on disk when present).
+- For most providers, a background request asks the provider for a live model list when the picker opens.
+- **OpenAI with a custom base URL** (`OPENAI_BASE_URL` or `providers.openai.api_base` not equivalent to `https://api.openai.com`): the live list comes from `GET <base>/v1/models`, using the same **`Authorization: Bearer <API key>`** header as chat requests. Gateways that omit `data`, return an empty array, or error out fall back to the bundled OpenAI defaults so the picker is not left empty.
+- **Anthropic:** the picker uses the bundled Claude entries (there is no public list-models call in this path).
+
+The interactive `claurst` binary runs these background updates on every UI frame, so the list fills in shortly after the picker opens when the network call succeeds.
 
 ```
 /model

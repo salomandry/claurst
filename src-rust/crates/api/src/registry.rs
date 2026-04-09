@@ -12,8 +12,8 @@ use crate::client::ClientConfig;
 use crate::provider::LlmProvider;
 use crate::provider_types::ProviderStatus;
 use crate::providers::{
-    AnthropicProvider, AzureProvider, BedrockProvider, CodexProvider, CohereProvider,
-    CopilotProvider, GoogleProvider, MinimaxProvider, OpenAiProvider,
+    normalize_openai_base_url, AnthropicProvider, AzureProvider, BedrockProvider, CodexProvider,
+    CohereProvider, CopilotProvider, GoogleProvider, MinimaxProvider, OpenAiProvider,
 };
 
 /// Registry of all available LLM providers.
@@ -71,7 +71,23 @@ fn provider_from_key(provider_id: &str, key: String) -> Option<Arc<dyn LlmProvid
     }
 }
 
-pub fn runtime_provider_for(provider_id: &str) -> Option<Arc<dyn LlmProvider>> {
+/// API key for a provider: `config.provider_configs.<id>.api_key` from settings.json
+/// wins, then [`claurst_core::AuthStore::api_key_for`] (auth.json + env vars).
+fn config_aware_api_key(provider_id: &str, config: &claurst_core::config::Config) -> Option<String> {
+    if let Some(pc) = config.provider_configs.get(provider_id) {
+        if let Some(ref k) = pc.api_key {
+            if !k.trim().is_empty() {
+                return Some(k.clone());
+            }
+        }
+    }
+    claurst_core::AuthStore::load().api_key_for(provider_id)
+}
+
+fn runtime_provider_for_with_config(
+    provider_id: &str,
+    config: &claurst_core::config::Config,
+) -> Option<Arc<dyn LlmProvider>> {
     use crate::providers::openai_compat_providers as p;
 
     // Local providers never require an API key — build them directly so that
@@ -87,12 +103,72 @@ pub fn runtime_provider_for(provider_id: &str) -> Option<Arc<dyn LlmProvider>> {
         _ => {}
     }
 
-    let auth_store = claurst_core::AuthStore::load();
-    let key = auth_store.api_key_for(provider_id)?;
+    let key = config_aware_api_key(provider_id, config)?;
     if key.is_empty() {
         return None;
     }
     provider_from_key(provider_id, key)
+}
+
+/// Build a provider from auth store / env only (no `settings.json` per-provider keys).
+/// Prefer [`provider_with_config_overrides`] when a [`Config`] is available.
+pub fn runtime_provider_for(provider_id: &str) -> Option<Arc<dyn LlmProvider>> {
+    runtime_provider_for_with_config(provider_id, &claurst_core::config::Config::default())
+}
+
+/// Resolve a provider the same way as the query coordinator: prefer a fresh
+/// provider using `provider_configs.<id>.api_key` from settings when set, then
+/// auth store + env (so e.g. `OPENAI_BASE_URL` works with a key only in
+/// `settings.json`), fall back to the pre-registered registry entry, then apply
+/// `provider_configs` `api_base` overrides for OpenAI and local OpenAI-compat servers.
+///
+/// Use this for **model listing** and any UI path that previously only called
+/// [`ProviderRegistry::get`], so custom base URLs match chat requests.
+pub fn provider_with_config_overrides(
+    registry: &ProviderRegistry,
+    provider_id: &str,
+    config: &claurst_core::config::Config,
+) -> Option<Arc<dyn LlmProvider>> {
+    use crate::providers::openai_compat_providers as p;
+
+    let pid = ProviderId::new(provider_id);
+    let runtime_provider = runtime_provider_for_with_config(provider_id, config);
+    let registry_provider = if runtime_provider.is_some() {
+        None
+    } else {
+        registry.get(&pid).cloned()
+    };
+    let mut provider = runtime_provider.or(registry_provider)?;
+
+    if let Some(override_base) = config
+        .provider_configs
+        .get(provider_id)
+        .and_then(|pc| pc.api_base.as_deref())
+    {
+        let trimmed = override_base.trim_end_matches('/');
+        let base_url = if trimmed.ends_with("/v1") {
+            trimmed.to_string()
+        } else {
+            format!("{}/v1", trimmed)
+        };
+        let overridden: Option<Arc<dyn LlmProvider>> = match provider_id {
+            "openai" => config_aware_api_key("openai", config).and_then(|key| {
+                normalize_openai_base_url(override_base).map(|base| {
+                    Arc::new(OpenAiProvider::new(key).with_base_url(base)) as Arc<dyn LlmProvider>
+                })
+            }),
+            "ollama" => Some(Arc::new(p::ollama().with_base_url(base_url))),
+            "lmstudio" | "lm-studio" => Some(Arc::new(p::lm_studio().with_base_url(base_url))),
+            "llamacpp" | "llama-cpp" | "llama-server" => {
+                Some(Arc::new(p::llama_cpp().with_base_url(base_url)))
+            }
+            _ => None,
+        };
+        if let Some(o) = overridden {
+            provider = o;
+        }
+    }
+    Some(provider)
 }
 
 impl ProviderRegistry {

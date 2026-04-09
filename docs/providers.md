@@ -97,6 +97,8 @@ Uses the OpenAI Chat Completions API (`/v1/chat/completions`).
 }
 ```
 
+**TUI model picker:** When the base URL is **not** the public OpenAI host, Claurst does not seed the picker from the global models catalog (IDs and pricing differ per gateway). Instead it loads models from **`GET /v1/models`** on that base URL, with **`Authorization: Bearer`** using the same API key as completions. If the response is missing `data`, empty, or the request fails, the picker falls back to a small built-in list so you can still choose a model.
+
 ---
 
 ### Google (Gemini)

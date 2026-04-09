@@ -68,6 +68,16 @@ fn openai_base_url_from_env() -> String {
         .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string())
 }
 
+/// When `true`, `GET /v1/models` may include non-OpenAI model ids (proxies,
+/// gateways). We only filter to GPT/o-family ids on the real `api.openai.com`
+/// host; otherwise the list would be empty for most compatible endpoints.
+fn restrict_models_to_openai_brand_ids(base_url: &str) -> bool {
+    match normalize_openai_base_url(base_url) {
+        Some(b) => b.eq_ignore_ascii_case(DEFAULT_OPENAI_BASE_URL),
+        None => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OpenAiProvider
 // ---------------------------------------------------------------------------
@@ -713,6 +723,14 @@ mod tests {
         assert_eq!(normalize_openai_base_url(""), None);
         assert_eq!(normalize_openai_base_url("   "), None);
     }
+
+    #[test]
+    fn restrict_models_to_openai_brand_only_on_public_api() {
+        assert!(restrict_models_to_openai_brand_ids("https://api.openai.com"));
+        assert!(restrict_models_to_openai_brand_ids("https://api.openai.com/v1"));
+        assert!(!restrict_models_to_openai_brand_ids("https://proxy.example.com"));
+        assert!(!restrict_models_to_openai_brand_ids("https://ai.custom.com/v1"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,23 +1054,35 @@ impl LlmProvider for OpenAiProvider {
         };
 
         let provider_id = self.id.clone();
+        let filter_openai_brand = restrict_models_to_openai_brand_ids(&self.base_url);
         let models: Vec<ModelInfo> = data
             .iter()
             .filter_map(|m| {
                 let id = m.get("id").and_then(|v| v.as_str())?;
-                // Only return GPT, O3, O4 family models.
-                if !id.starts_with("gpt-")
-                    && !id.starts_with("o3")
-                    && !id.starts_with("o4")
-                    && !id.starts_with("o1")
-                {
+                if filter_openai_brand {
+                    // Public OpenAI API only: hide non-Chat/Completion models from the picker.
+                    if !id.starts_with("gpt-")
+                        && !id.starts_with("o3")
+                        && !id.starts_with("o4")
+                        && !id.starts_with("o1")
+                    {
+                        return None;
+                    }
+                } else if id.starts_with("text-embedding") {
+                    // Compatible gateways often list embedding models; omit from chat picker.
                     return None;
                 }
+                let ctx = m
+                    .get("context_window")
+                    .or_else(|| m.get("context_length"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(128_000)
+                    .min(u32::MAX as u64) as u32;
                 Some(ModelInfo {
                     id: ModelId::new(id),
                     provider_id: provider_id.clone(),
                     name: id.to_string(),
-                    context_window: 128_000,
+                    context_window: ctx,
                     max_output_tokens: 16_384,
                 })
             })

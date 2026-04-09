@@ -1442,11 +1442,21 @@ impl App {
             self.model_registry.load_cache(&cache_path);
         }
 
-        let models = crate::model_picker::models_for_provider_from_registry(
-            provider_id,
-            &self.model_registry,
-        );
-        self.model_picker.set_models(models);
+        // Custom OpenAI base URL: never seed from models.dev (shows GPT-4o (2024-11-20), etc.).
+        // Show loading until GET /v1/models returns from the gateway.
+        let custom_openai = provider_id == "openai"
+            && crate::model_picker::openai_uses_non_default_base(&self.config);
+        if custom_openai {
+            self.model_picker.models.clear();
+            self.model_picker.loading_models = true;
+            self.model_picker.models_loaded = false;
+        } else {
+            let models = crate::model_picker::models_for_provider_from_registry(
+                provider_id,
+                &self.model_registry,
+            );
+            self.model_picker.set_models(models);
+        }
         self.model_picker_fetch_pending = true;
 
         let provider_prefix = format!("{}/", provider_id);
@@ -5014,6 +5024,235 @@ impl App {
     // Main run loop
     // -------------------------------------------------------------------
 
+    /// Per-frame background work shared by the CLI main loop and [`App::run`]:
+    /// cost/token sync, notification TTLs, async model list fetch, session list,
+    /// voice events, and task overlay refresh.
+    pub fn tick_background_tasks(&mut self) {
+        // Sync cost/token counters from the shared tracker
+        self.cost_usd = self.cost_tracker.total_cost_usd();
+        self.token_count = self.cost_tracker.total_tokens() as u32;
+
+        // Expire old notifications
+        self.notifications.tick();
+        self.memory_update_notification.tick();
+
+        // Drain background model-fetch results (non-blocking).
+        if let Some(ref mut rx) = self.model_fetch_rx {
+            match rx.try_recv() {
+                Ok(Ok(entries)) => {
+                    let provider = self
+                        .config
+                        .provider
+                        .clone()
+                        .unwrap_or_else(|| "anthropic".to_string());
+                    let provider_prefix = format!("{}/", provider);
+                    let current = self
+                        .model_name
+                        .strip_prefix(&provider_prefix)
+                        .unwrap_or(self.model_name.as_str())
+                        .to_string();
+                    // Many OpenAI-compatible gateways return 200 with an empty `data` array,
+                    // or omit `data` entirely — that used to replace the picker with zero rows.
+                    let mut entries = entries;
+                    if entries.is_empty() {
+                        entries = crate::model_picker::models_for_provider_from_registry(
+                            &provider,
+                            &self.model_registry,
+                        );
+                    }
+                    self.model_picker.set_models(entries);
+                    // Re-apply the current-model highlight so it stays accurate.
+                    for m in &mut self.model_picker.models {
+                        m.is_current = m.id == current;
+                    }
+                    self.model_fetch_rx = None;
+                }
+                Ok(Err(()))
+                | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.model_picker.loading_models = false;
+                    self.model_fetch_rx = None;
+                    // Failed fetch or no resolvable provider (e.g. missing key): keep a usable list.
+                    if self.model_picker.models.is_empty() {
+                        let provider = self
+                            .config
+                            .provider
+                            .clone()
+                            .unwrap_or_else(|| "anthropic".to_string());
+                        let models = crate::model_picker::models_for_provider_from_registry(
+                            &provider,
+                            &self.model_registry,
+                        );
+                        self.model_picker.set_models(models);
+                        let provider_prefix = format!("{}/", provider);
+                        let current = self
+                            .model_name
+                            .strip_prefix(&provider_prefix)
+                            .unwrap_or(self.model_name.as_str())
+                            .to_string();
+                        for m in &mut self.model_picker.models {
+                            m.is_current = m.id == current;
+                        }
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            }
+        }
+
+        // Spawn async provider model-list fetch when requested.
+        if self.model_picker_fetch_pending {
+            self.model_picker_fetch_pending = false;
+            let provider_id_str = self.config.provider.clone().unwrap_or_else(|| "anthropic".to_string());
+            let cfg = self.config.clone();
+            let reg = self
+                .provider_registry
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::new(claurst_api::ProviderRegistry::new()));
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            self.model_fetch_rx = Some(rx);
+            self.model_picker.loading_models = true;
+            tokio::spawn(async move {
+                let provider = claurst_api::registry::provider_with_config_overrides(
+                    &reg,
+                    &provider_id_str,
+                    &cfg,
+                );
+                let Some(provider) = provider else {
+                    let _ = tx.send(Err(())).await;
+                    return;
+                };
+                match provider.list_models().await {
+                    Ok(models) => {
+                        let entries: Vec<crate::model_picker::ModelEntry> = models
+                            .into_iter()
+                            .map(|m| {
+                                let ctx_k = m.context_window / 1000;
+                                crate::model_picker::ModelEntry {
+                                    id: m.id.to_string(),
+                                    display_name: m.name.clone(),
+                                    description: format!("{}K context", ctx_k),
+                                    is_current: false,
+                                }
+                            })
+                            .collect();
+                        let _ = tx.send(Ok(entries)).await;
+                    }
+                    Err(_) => {
+                        let _ = tx.send(Err(())).await;
+                    }
+                }
+            });
+        }
+
+        // Drain background session-list results.
+        if let Some(ref mut rx) = self.session_list_rx {
+            match rx.try_recv() {
+                Ok(entries) => {
+                    self.session_browser.sessions = entries;
+                    self.session_browser.selected_idx = 0;
+                    self.session_list_rx = None;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.session_list_rx = None;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            }
+        }
+
+        // Spawn async session-list load when requested.
+        if self.session_list_pending {
+            self.session_list_pending = false;
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            self.session_list_rx = Some(rx);
+            tokio::spawn(async move {
+                let sessions = claurst_core::history::list_sessions().await;
+                let entries: Vec<crate::session_browser::SessionEntry> = sessions
+                    .into_iter()
+                    .map(|s| {
+                        let age = chrono::Utc::now()
+                            .signed_duration_since(s.updated_at);
+                        let last_updated = if age.num_minutes() < 1 {
+                            "just now".to_string()
+                        } else if age.num_hours() < 1 {
+                            format!("{}m ago", age.num_minutes())
+                        } else if age.num_hours() < 24 {
+                            format!("{}h ago", age.num_hours())
+                        } else {
+                            format!("{}d ago", age.num_days())
+                        };
+                        crate::session_browser::SessionEntry {
+                            id: s.id,
+                            title: s.title.unwrap_or_else(|| "(untitled)".to_string()),
+                            last_updated,
+                            message_count: s.messages.len(),
+                            cost_usd: s.total_cost,
+                        }
+                    })
+                    .collect();
+                let _ = tx.send(entries).await;
+            });
+        }
+
+        // Drain voice transcription events (non-blocking).
+        // When the background recording/transcription task emits a
+        // TranscriptReady event we insert the text directly into the
+        // prompt so the user can review and submit it.
+        {
+            use claurst_core::voice::VoiceEvent;
+            let mut events = Vec::new();
+            if let Some(ref mut rx) = self.voice_event_rx {
+                while let Ok(ev) = rx.try_recv() {
+                    events.push(ev);
+                }
+            }
+            for ev in events {
+                match ev {
+                    VoiceEvent::RecordingStarted => {
+                        self.voice_recording = true;
+                        self.status_message =
+                            Some("Recording\u{2026} press V again or Enter to stop".to_string());
+                    }
+                    VoiceEvent::RecordingStopped => {
+                        self.voice_recording = false;
+                        self.status_message =
+                            Some("Transcribing\u{2026}".to_string());
+                    }
+                    VoiceEvent::TranscriptReady(text) => {
+                        if !text.is_empty() {
+                            // Append to existing prompt text with a space separator
+                            // so the user can combine voice + typed input.
+                            if !self.prompt_input.text.is_empty()
+                                && !self.prompt_input.text.ends_with(' ')
+                            {
+                                self.prompt_input.paste(" ");
+                            }
+                            self.prompt_input.paste(&text);
+                            self.refresh_prompt_input();
+                            self.status_message = Some(
+                                format!("Transcribed: {}", &text[..text.len().min(60)])
+                            );
+                        }
+                        // Clear the channel once we have the result.
+                        self.voice_event_rx = None;
+                    }
+                    VoiceEvent::Error(msg) => {
+                        self.voice_recording = false;
+                        self.voice_event_rx = None;
+                        self.notifications.push(
+                            NotificationKind::Warning,
+                            format!("Voice: {}", msg),
+                            Some(8),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Refresh task list if the overlay is visible (every frame for live updates)
+        if self.tasks_overlay.visible {
+            self.tasks_overlay.refresh_tasks(&claurst_tools::TASK_STORE);
+        }
+    }
+
     /// Run the TUI event loop. Returns `Some(input)` when the user submits
     /// a message, or `None` when the user quits.
     pub fn run(
@@ -5023,190 +5262,7 @@ impl App {
         loop {
             self.frame_count = self.frame_count.wrapping_add(1);
 
-            // Sync cost/token counters from the shared tracker
-            self.cost_usd = self.cost_tracker.total_cost_usd();
-            self.token_count = self.cost_tracker.total_tokens() as u32;
-
-            // Expire old notifications
-            self.notifications.tick();
-            self.memory_update_notification.tick();
-
-            // Drain background model-fetch results (non-blocking).
-            if let Some(ref mut rx) = self.model_fetch_rx {
-                match rx.try_recv() {
-                    Ok(Ok(entries)) => {
-                        let provider = self
-                            .config
-                            .provider
-                            .clone()
-                            .unwrap_or_else(|| "anthropic".to_string());
-                        let provider_prefix = format!("{}/", provider);
-                        let current = self
-                            .model_name
-                            .strip_prefix(&provider_prefix)
-                            .unwrap_or(self.model_name.as_str())
-                            .to_string();
-                        self.model_picker.set_models(entries);
-                        // Re-apply the current-model highlight so it stays accurate.
-                        for m in &mut self.model_picker.models {
-                            m.is_current = m.id == current;
-                        }
-                        self.model_fetch_rx = None;
-                    }
-                    Ok(Err(()))
-                    | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        self.model_picker.loading_models = false;
-                        self.model_fetch_rx = None;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                }
-            }
-
-            // Spawn async provider model-list fetch when requested.
-            if self.model_picker_fetch_pending {
-                self.model_picker_fetch_pending = false;
-                let provider_id_str = self.config.provider.clone().unwrap_or_else(|| "anthropic".to_string());
-                if let Some(ref registry) = self.provider_registry {
-                    let pid = claurst_core::ProviderId::new(&provider_id_str);
-                    if let Some(provider) = registry.get(&pid) {
-                        let provider = provider.clone();
-                        let (tx, rx) = tokio::sync::mpsc::channel(1);
-                        self.model_fetch_rx = Some(rx);
-                        self.model_picker.loading_models = true;
-                        tokio::spawn(async move {
-                            match provider.list_models().await {
-                                Ok(models) => {
-                                    let entries: Vec<crate::model_picker::ModelEntry> = models
-                                        .into_iter()
-                                        .map(|m| {
-                                            let ctx_k = m.context_window / 1000;
-                                            crate::model_picker::ModelEntry {
-                                                id: m.id.to_string(),
-                                                display_name: m.name.clone(),
-                                                description: format!("{}K context", ctx_k),
-                                                is_current: false,
-                                            }
-                                        })
-                                        .collect();
-                                    let _ = tx.send(Ok(entries)).await;
-                                }
-                                Err(_) => {
-                                    let _ = tx.send(Err(())).await;
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-
-            // Drain background session-list results.
-            if let Some(ref mut rx) = self.session_list_rx {
-                match rx.try_recv() {
-                    Ok(entries) => {
-                        self.session_browser.sessions = entries;
-                        self.session_browser.selected_idx = 0;
-                        self.session_list_rx = None;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        self.session_list_rx = None;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                }
-            }
-
-            // Spawn async session-list load when requested.
-            if self.session_list_pending {
-                self.session_list_pending = false;
-                let (tx, rx) = tokio::sync::mpsc::channel(1);
-                self.session_list_rx = Some(rx);
-                tokio::spawn(async move {
-                    let sessions = claurst_core::history::list_sessions().await;
-                    let entries: Vec<crate::session_browser::SessionEntry> = sessions
-                        .into_iter()
-                        .map(|s| {
-                            let age = chrono::Utc::now()
-                                .signed_duration_since(s.updated_at);
-                            let last_updated = if age.num_minutes() < 1 {
-                                "just now".to_string()
-                            } else if age.num_hours() < 1 {
-                                format!("{}m ago", age.num_minutes())
-                            } else if age.num_hours() < 24 {
-                                format!("{}h ago", age.num_hours())
-                            } else {
-                                format!("{}d ago", age.num_days())
-                            };
-                            crate::session_browser::SessionEntry {
-                                id: s.id,
-                                title: s.title.unwrap_or_else(|| "(untitled)".to_string()),
-                                last_updated,
-                                message_count: s.messages.len(),
-                                cost_usd: s.total_cost,
-                            }
-                        })
-                        .collect();
-                    let _ = tx.send(entries).await;
-                });
-            }
-
-            // Drain voice transcription events (non-blocking).
-            // When the background recording/transcription task emits a
-            // TranscriptReady event we insert the text directly into the
-            // prompt so the user can review and submit it.
-            {
-                use claurst_core::voice::VoiceEvent;
-                let mut events = Vec::new();
-                if let Some(ref mut rx) = self.voice_event_rx {
-                    while let Ok(ev) = rx.try_recv() {
-                        events.push(ev);
-                    }
-                }
-                for ev in events {
-                    match ev {
-                        VoiceEvent::RecordingStarted => {
-                            self.voice_recording = true;
-                            self.status_message =
-                                Some("Recording\u{2026} press V again or Enter to stop".to_string());
-                        }
-                        VoiceEvent::RecordingStopped => {
-                            self.voice_recording = false;
-                            self.status_message =
-                                Some("Transcribing\u{2026}".to_string());
-                        }
-                        VoiceEvent::TranscriptReady(text) => {
-                            if !text.is_empty() {
-                                // Append to existing prompt text with a space separator
-                                // so the user can combine voice + typed input.
-                                if !self.prompt_input.text.is_empty()
-                                    && !self.prompt_input.text.ends_with(' ')
-                                {
-                                    self.prompt_input.paste(" ");
-                                }
-                                self.prompt_input.paste(&text);
-                                self.refresh_prompt_input();
-                                self.status_message = Some(
-                                    format!("Transcribed: {}", &text[..text.len().min(60)])
-                                );
-                            }
-                            // Clear the channel once we have the result.
-                            self.voice_event_rx = None;
-                        }
-                        VoiceEvent::Error(msg) => {
-                            self.voice_recording = false;
-                            self.voice_event_rx = None;
-                            self.notifications.push(
-                                NotificationKind::Warning,
-                                format!("Voice: {}", msg),
-                                Some(8),
-                            );
-                        }
-                    }
-                }
-            }
-
-            // Refresh task list if the overlay is visible (every frame for live updates)
-            if self.tasks_overlay.visible {
-                self.tasks_overlay.refresh_tasks(&claurst_tools::TASK_STORE);
-            }
+            self.tick_background_tasks();
 
             // Draw the frame
             terminal.draw(|f| render::render_app(f, self))?;
