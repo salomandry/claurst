@@ -25,7 +25,7 @@ It's fast, it's memory-efficient, it's yours to run however you want, and there'
 
 > [!NOTE]
 > **Recent Updates:**
-> - Session switching fix: Switching sessions from the session browser now works reliably without stack overflow crashes. Sessions load asynchronously to keep the UI responsive. `[FIXED]`
+> - **Session browser:** Resuming a session from `/resume` loads in the background so the UI stays responsive while switching. `[IMPROVED]`
 > - Speech modes: Try /Rocky and /Caveman to hear the difference! /Normal to go back. `[EXPERIMENTAL]`
 >
 > - Multi-Provider Support is here! Run /Connect to connect to the AI provider of your choice - Anthropic, OpenAI, Google, GitHub Copilot, Ollama, DeepSeek, Groq, Mistral, and [30+ more](#supported-providers). `[EXPERIMENTAL]`

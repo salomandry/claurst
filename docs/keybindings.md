@@ -10,6 +10,7 @@ This document covers all keyboard shortcuts in Claurst, how to customize them, v
    - [Global Context](#global-context)
    - [Chat Context](#chat-context)
    - [Confirmation Context](#confirmation-context)
+   - [Session browser overlay](#session-browser-overlay)
 2. [Keybinding Contexts](#keybinding-contexts)
 3. [Customizing Keybindings](#customizing-keybindings)
    - [Via /keybindings command](#via-keybindings-command)
@@ -78,6 +79,19 @@ These bindings are active when Claurst is displaying a yes/no confirmation promp
 | `A` / `a` | alwaysAllow | Approve and add a permanent allow rule |
 | `Enter` | defaultAction | Accept the highlighted default option |
 | `Escape` | cancel | Cancel the prompt and deny the action |
+
+### Session browser overlay
+
+These shortcuts apply while the session browser (opened via `/resume` with no arguments) is visible. They are handled by the overlay and are not part of the rebindable keybinding system.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Move selection to the previous / next session |
+| `Enter` | Load the selected session and close the overlay |
+| `r` | Start renaming the selected session |
+| `Esc` | Close the session browser |
+
+While renaming a session: `Enter` confirms, `Esc` cancels, `Backspace` deletes characters, and other keys add to the new name.
 
 ---
 
