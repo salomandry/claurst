@@ -70,6 +70,8 @@ Uses the OpenAI Chat Completions API (`/v1/chat/completions`).
 
 **Authentication:** `OPENAI_API_KEY` environment variable.
 
+**Base URL override:** Set `OPENAI_BASE_URL` to a compatible proxy or gateway (e.g. `https://api.openai.com` or `https://api.openai.com/v1`).
+
 **Default model:** `gpt-4o`
 
 **Available models (bundled snapshot):**

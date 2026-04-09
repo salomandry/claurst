@@ -36,6 +36,38 @@ use crate::provider_types::SystemPrompt;
 
 use super::request_options::merge_openai_compatible_options;
 
+/// Default OpenAI API origin (no `/v1` suffix; request paths append `/v1/...`).
+const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com";
+
+/// Normalize a user-supplied base URL. Returns `None` when empty after trim.
+/// Strips a trailing `/v1` so either `https://api.openai.com` or
+/// `https://api.openai.com/v1` works with `{base}/v1/chat/completions`.
+pub fn normalize_openai_base_url(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let t = t.trim_end_matches('/');
+    let base = if t.ends_with("/v1") {
+        &t[..t.len() - 3]
+    } else {
+        t
+    };
+    let base = base.trim_end_matches('/');
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_string())
+    }
+}
+
+fn openai_base_url_from_env() -> String {
+    std::env::var("OPENAI_BASE_URL")
+        .ok()
+        .and_then(|s| normalize_openai_base_url(&s))
+        .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // OpenAiProvider
 // ---------------------------------------------------------------------------
@@ -58,7 +90,7 @@ impl OpenAiProvider {
         Self {
             id: ProviderId::new(ProviderId::OPENAI),
             name: "OpenAI".to_string(),
-            base_url: "https://api.openai.com".to_string(),
+            base_url: openai_base_url_from_env(),
             api_key,
             http_client,
         }
@@ -658,6 +690,28 @@ mod tests {
         assert_eq!(wire[0].get("role").and_then(|v| v.as_str()), Some("user"));
         assert_eq!(wire[1].get("role").and_then(|v| v.as_str()), Some("tool"));
         assert_eq!(wire[1].get("tool_call_id").and_then(|v| v.as_str()), Some("call_2"));
+    }
+
+    #[test]
+    fn normalize_openai_base_url_strips_v1_suffix() {
+        assert_eq!(
+            normalize_openai_base_url("https://api.openai.com/v1").as_deref(),
+            Some("https://api.openai.com")
+        );
+        assert_eq!(
+            normalize_openai_base_url("https://proxy.example.com/v1/").as_deref(),
+            Some("https://proxy.example.com")
+        );
+        assert_eq!(
+            normalize_openai_base_url("https://gateway/v1").as_deref(),
+            Some("https://gateway")
+        );
+    }
+
+    #[test]
+    fn normalize_openai_base_url_empty_means_none() {
+        assert_eq!(normalize_openai_base_url(""), None);
+        assert_eq!(normalize_openai_base_url("   "), None);
     }
 }
 

@@ -5,7 +5,7 @@ pub(crate) mod message_normalization;
 pub(crate) mod request_options;
 
 pub mod openai;
-pub use openai::OpenAiProvider;
+pub use openai::{normalize_openai_base_url, OpenAiProvider};
 
 pub mod google;
 pub use google::GoogleProvider;

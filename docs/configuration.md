@@ -388,6 +388,7 @@ and `api_base` override the corresponding environment variables.
 | `CLAURST_PROVIDER` | Active provider. Equivalent to `--provider`. |
 | `CLAURST_API_BASE` | Override the API base URL for the active provider. Equivalent to `--api_base`. |
 | `OPENAI_API_KEY` | API key for the `openai` provider. |
+| `OPENAI_BASE_URL` | Override the OpenAI API origin (default `https://api.openai.com`). May include `/v1`; trailing slashes are trimmed. |
 | `GOOGLE_API_KEY` | API key for the `google` provider. |
 | `GROQ_API_KEY` | API key for the `groq` provider. |
 | `XAI_API_KEY` | API key for the `xai` provider. |

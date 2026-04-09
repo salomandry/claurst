@@ -969,6 +969,21 @@ pub async fn run_query_loop(
                     };
                     let overridden: Option<std::sync::Arc<dyn claurst_api::LlmProvider>> =
                         match provider_id_str.as_str() {
+                            // OpenAI: same as OPENAI_BASE_URL / env registration — config api_base
+                            // must override the default https://api.openai.com for proxies.
+                            "openai" => claurst_core::AuthStore::load()
+                                .api_key_for("openai")
+                                .and_then(|key| {
+                                    claurst_api::normalize_openai_base_url(override_base).map(
+                                        |base| {
+                                            std::sync::Arc::new(
+                                                claurst_api::OpenAiProvider::new(key)
+                                                    .with_base_url(base),
+                                            )
+                                                as std::sync::Arc<dyn claurst_api::LlmProvider>
+                                        },
+                                    )
+                                }),
                             "ollama" => Some(std::sync::Arc::new(
                                 openai_compat_providers::ollama().with_base_url(base_url),
                             )),

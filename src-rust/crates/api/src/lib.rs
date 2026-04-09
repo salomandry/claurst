@@ -75,7 +75,7 @@ pub use registry::ProviderRegistry;
 pub use providers::AnthropicProvider;
 pub use providers::GoogleProvider;
 pub use providers::MinimaxProvider;
-pub use providers::OpenAiProvider;
+pub use providers::{normalize_openai_base_url, OpenAiProvider};
 
 // Phase 3 re-exports — model registry.
 pub use model_registry::{ModelEntry, ModelRegistry, effective_model_for_config};

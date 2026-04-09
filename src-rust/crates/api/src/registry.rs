@@ -187,7 +187,8 @@ impl ProviderRegistry {
     }
 
     /// Register [`OpenAiProvider`] if `OPENAI_API_KEY` is set in the
-    /// environment.  Returns `&mut self` for builder chaining.
+    /// environment.  The API origin is `OPENAI_BASE_URL` when set, else
+    /// `https://api.openai.com`.  Returns `&mut self` for builder chaining.
     pub fn with_openai_if_key_set(&mut self) -> &mut Self {
         if let Ok(key) = std::env::var("OPENAI_API_KEY") {
             let provider = Arc::new(OpenAiProvider::new(key));
